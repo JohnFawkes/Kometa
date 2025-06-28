@@ -1,5 +1,7 @@
-import os, re
+import os, re, sys, io
 from datetime import datetime
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 from modules import util, radarr, sonarr, operations
 from modules.anidb import AniDB
 from modules.anilist import AniList
@@ -29,6 +31,7 @@ from modules.trakt import Trakt
 from modules.tvdb import TVDb
 from modules.util import Failed, NotScheduled, NotScheduledRange
 from modules.webhooks import Webhooks
+
 
 logger = util.logger
 
@@ -152,15 +155,99 @@ library_operations = {
 }
 
 class ConfigFile:
+#    """Manages the configuration for the application."""
+
+    @staticmethod
+    def _redact_config_recursively(yaml_content: str) -> str:
+#        """
+#        Parses YAML content using ruamel.yaml and recursively redacts sensitive information.
+
+#        It performs two types of redaction:
+#        1. Redacts the 'url' key only when it is a child of a specific sensitive block
+#           ('sonarr', 'radarr', 'tautulli', 'gotify', 'ntfy', 'plex').
+#        2. Redacts other sensitive keys (e.g., 'token', 'password') anywhere they appear.
+
+#        Args:
+#            yaml_content: A string containing the raw YAML configuration.
+
+#        Returns:
+#            A YAML formatted string with specified information redacted.
+#        """
+        # --- Redaction Rules ---
+        BLOCKS_WITH_URL_REDACTION = {'sonarr', 'radarr', 'tautulli', 'gotify', 'ntfy', 'plex'}
+        
+        # Pattern for sensitive keys OTHER THAN 'url'
+        OTHER_SENSITIVE_KEY_PATTERN = re.compile(
+            r"^(token|client.*|api_*key|secret|error|delete|run_start|run_end|version|changes|username|password)$"
+        )
+
+        yaml = YAML()
+        yaml.preserve_quotes = True
+        yaml.indent(mapping=2, sequence=4, offset=2)
+
+        try:
+            data = yaml.load(yaml_content)
+        except YAMLError as e:
+            return f"# --- YAML PARSING FAILED --- #\n# Redaction could not be performed.\n# Error: {e}"
+
+        def _recursive_redact_inplace(current_data, parent_key=None):
+#            """A helper function to walk through the data and apply redaction rules in-place."""
+            if isinstance(current_data, dict):
+                for key in list(current_data.keys()):
+                    # Rule 1: Always redact non-url sensitive keys
+                    if OTHER_SENSITIVE_KEY_PATTERN.match(str(key)):
+                        current_data[key] = '(redacted)'
+                    # Rule 2: Redact 'url' only if its direct parent is a sensitive block
+                    elif str(key) == 'url' and parent_key in BLOCKS_WITH_URL_REDACTION:
+                        current_data[key] = '(redacted)'
+                    else:
+                        # Recurse, passing the current key as the new parent for the next level
+                        _recursive_redact_inplace(current_data[key], parent_key=key)
+            elif isinstance(current_data, list):
+                # For lists, we keep the same parent context for all items
+                for item in current_data:
+                    _recursive_redact_inplace(item, parent_key=parent_key)
+
+        # Start the recursive, in-place redaction process on the loaded data.
+        _recursive_redact_inplace(data)
+        
+        string_stream = io.StringIO()
+        # This is the corrected line that fixes the NameError.
+        # It now dumps the 'data' object which has been modified in-place.
+        yaml.dump(data, string_stream)
+        return string_stream.getvalue()
+
     def __init__(self, in_request, default_dir, attrs, secrets):
         logger.info("Locating config...")
-        config_file = attrs["config_file"]
-        if config_file and os.path.exists(config_file):                     self.config_path = os.path.abspath(config_file)
-        elif config_file and not os.path.exists(config_file):               raise Failed(f"Config Error: config not found at {os.path.abspath(config_file)}")
-        elif os.path.exists(os.path.join(default_dir, "config.yml")):       self.config_path = os.path.abspath(os.path.join(default_dir, "config.yml"))
-        else:                                                               raise Failed(f"Config Error: config not found at {os.path.abspath(default_dir)}")
+        config_file = attrs.get("config_file")
+        if config_file and os.path.exists(config_file):
+            self.config_path = os.path.abspath(config_file)
+        elif config_file and not os.path.exists(config_file):
+            raise Failed(f"Config Error: config not found at {os.path.abspath(config_file)}")
+        elif os.path.exists(os.path.join(default_dir, "config.yml")):
+            self.config_path = os.path.abspath(os.path.join(default_dir, "config.yml"))
+        else:
+            raise Failed(f"Config Error: config not found at {os.path.abspath(default_dir)}")
+
         logger.info(f"Using {self.config_path} as config")
         logger.clear_errors()
+
+        # Log the redacted config for debugging.
+        try:
+            with open(self.config_path, encoding="utf-8") as fp:
+                raw_config_content = fp.read()
+            
+            redacted_content = self._redact_config_recursively(raw_config_content)
+
+            logger.separator("Redacted Config", space=False, border=False, debug=True)
+            for line in redacted_content.splitlines():
+                logger.debug(line)
+            logger.debug("")
+
+        except FileNotFoundError:
+            logger.error(f"Configuration file not found at path: {self.config_path}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while processing the config file: {e}")
 
         self._mediastingers = None
         self.Requests = in_request
@@ -198,13 +285,6 @@ class ConfigFile:
         self.env_plex_token = attrs["plex_token"] if "plex_token" in attrs else ""
         self.tpdb_timer = None
         current_time = datetime.now()
-
-        with open(self.config_path, encoding="utf-8") as fp:
-            logger.separator("Redacted Config", space=False, border=False, debug=True)
-            for line in fp.readlines():
-                logger.debug(re.sub(r"(token|client.*|url|api_*key|secret|error|delete|run_start|run_end|version|changes|username|password): .+", r"\1: (redacted)", line.strip("\r\n")))
-            logger.debug("")
-
         self.data = self.Requests.file_yaml(self.config_path).data
 
         def replace_attr(all_data, in_attr, par):
