@@ -12,7 +12,8 @@ from flask import Flask, render_template, request, jsonify, Response, stream_wit
 
 # Path to kometa root
 KOMETA_ROOT = Path(__file__).parent.parent.resolve()
-CONFIG_DIR = KOMETA_ROOT / "config"
+# In Docker the config volume is mounted at /config, not inside the app directory
+CONFIG_DIR = Path("/config") if os.environ.get("KOMETA_DOCKER") else KOMETA_ROOT / "config"
 
 app = Flask(__name__)
 
