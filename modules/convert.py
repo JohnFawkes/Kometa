@@ -9,7 +9,7 @@ from modules.util import Failed, MappingConvertError, NonExisting
 
 logger = util.logger
 
-anime_lists_url = "https://raw.githubusercontent.com/Kometa-Team/Anime-IDs/master/anime_ids.json"
+anime_lists_url = "https://raw.githubusercontent.com/JohnFawkes/Anime-IDs/master/anime_ids.json"
 
 
 class Convert:
